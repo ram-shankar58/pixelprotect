@@ -95,7 +95,7 @@ def register(image, num_shares):
     return x, y  # Return the coordinates of the selected point
 
 def dhash(image, hash_size=8):
-    image = image.resize((hash_size + 1, hash_size), Image.ANTIALIAS).convert("L")
+    image = image.resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS).convert("L")
     pixels = np.array(image)
     diff = pixels[:, 1:] > pixels[:, :-1]
     decimal_value = 0
