@@ -23,13 +23,15 @@ def split_channel(channel, r, num_shares):
             pixel = channel.getpixel((i, j))
             x, y, z = hindmarsh_rose_model(x, y, z, a, b, c, d, r, x_r, I)
             chaotic_maps = [int(r * (1 - r) * pixel * (x + y + z)) for _ in range(num_shares - 1)]
+            chaotic_maps = np.clip(chaotic_maps, 0, 255)
             for k, share in enumerate(shares[:-1]):
                 share[i, j] = chaotic_maps[k]
-            shares[-1][i, j] = pixel - sum(chaotic_maps)
+            shares[-1][i, j] = np.clip(pixel - sum(chaotic_maps), 0, 255)
             if num_shares % 2 == 0:
                 x_logistic = r * x_logistic * (1 - x_logistic)
-                for share in shares:
-                    share[i, j] = int(r * (1 - r) * share[i, j] * x_logistic)
+                if not np.isnan(x_logistic) and not np.isinf(x_logistic):
+                    for share in shares:
+                        share[i, j] = np.clip(int(r * (1 - r) * share[i, j] * x_logistic), 0, 255)
     for i, share in enumerate(shares):
         share_image = Image.fromarray(share)
         share_image.save(f"share{i+1}.png")
@@ -41,8 +43,9 @@ def combine_channel(shares):
         for i in range(shares[0].shape[0]):
             for j in range(shares[0].shape[1]):
                 x_logistic = r * x_logistic * (1 - x_logistic)
-                for share in shares:
-                    share[i, j] = int(share[i, j] / (x_logistic + 1e-10))
+                if not np.isnan(x_logistic) and not np.isinf(x_logistic):
+                    for share in shares:
+                        share[i, j] = int(share[i, j] / (x_logistic + 1e-10))
     combined_channel = sum(shares)
     combined_channel = np.clip(combined_channel, 0, 255)
     combined_channel = combined_channel.astype(np.uint8)
@@ -65,11 +68,13 @@ def split_image(image, r, num_shares):
     r_shares = split_channel(r_channel, r, num_shares)
     g_shares = split_channel(g_channel, r, num_shares)
     b_shares = split_channel(b_channel, r, num_shares)
+    return r_shares, g_shares, b_shares
+
+def combine_image(r_shares, g_shares, b_shares):
     combined_r = combine_channel(r_shares)
     combined_g = combine_channel(g_shares)
     combined_b = combine_channel(b_shares)
     combined_image = Image.merge("RGB", (combined_r, combined_g, combined_b))
-    combined_image = combined_image.transpose(Image.TRANSPOSE)
     return combined_image
 
 def register(image, num_shares):
@@ -89,8 +94,7 @@ def register(image, num_shares):
     point_image.save("selected_point.png")
 
     # Split the image into shares
-    combined_image = split_image(image, r, num_shares)
-    combined_image.save("combined_image.png")
+    split_image(image, r, num_shares)
 
     return x, y  # Return the coordinates of the selected point
 
@@ -104,49 +108,73 @@ def dhash(image, hash_size=8):
     return hex(decimal_value)[2:]
 
 def authenticate(original_image, num_shares, x, y, hash_size=8, max_distance=20):
-    print("Please select the same point in the original image:")
-    original_image_array = np.array(original_image)
-    plt.imshow(original_image_array)
-    plt.axis("off")
-    plt.show(block=False)
-    point = plt.ginput(1)  # Allow the user to select a single point
-    plt.close()
+    # Prompt the user to input the file paths of the share images
+    share_paths = []
+    for i in range(num_shares):
+        share_path = input(f"Enter the file path for share{i+1}.png: ")
+        share_paths.append(share_path)
 
-    # Convert the selected point to integer coordinates
-    x_selected, y_selected = map(int, point[0])
+    # Reconstruct the image from uploaded shares
+    r_shares = []
+    g_shares = []
+    b_shares = []
+    for share_path in share_paths:
+        share_image = Image.open(share_path).convert("RGB")
+        r_channel, g_channel, b_channel = share_image.split()
+        r_shares.append(np.array(r_channel))
+        g_shares.append(np.array(g_channel))
+        b_shares.append(np.array(b_channel))
 
-    # Calculate the distance between the chosen coordinates and the set coordinates
-    distance = abs(x_selected - x) + abs(y_selected - y)
+    combined_image = combine_image(r_shares, g_shares, b_shares)
 
-    if distance > max_distance:
-        print(f"Authentication failed")
-        return False
+    combined_image.show()
 
-    point_image = original_image.crop((x_selected, y_selected, x_selected + 1, y_selected + 1))
-    original_hash = dhash(point_image, hash_size)
+    if np.array_equal(np.array(original_image), np.array(combined_image)):
+        print("Reconstructed image matches the original image.")
 
-    combined_image = Image.open("combined_image.png")
+        # Ask the user to select the same point in the original image
+        print("Please select the same point in the original image:")
+        original_image_array = np.array(original_image)
+        plt.imshow(original_image_array)
+        plt.axis("off")
+        plt.show(block=False)
+        point = plt.ginput(1)  # Allow the user to select a single point
+        plt.close()
 
-    # Compare the hash values of the selected point in each share
-    for i in range(1, num_shares + 1):
-        share_name = f"share{i}.png"
-        share_image = Image.open(share_name)
-        share_point_image = share_image.crop((x_selected, y_selected, x_selected + 1, y_selected + 1))
-        share_hash = dhash(share_point_image, hash_size)
+        # Convert the selected point to integer coordinates
+        x_selected, y_selected = map(int, point[0])
 
-        # Compare the hash values using a threshold (adjust as needed)
-        if hamming_distance(original_hash, share_hash) < hash_size // 2:
-            print(f"Authentication successful! ")
-            return True
+        # Calculate the distance between the chosen coordinates and the set coordinates
+        distance = abs(x_selected - x) + abs(y_selected - y)
 
-    print("Authentication failed: Selected point does not match in one or more shares.")
+        if distance > max_distance:
+            print(f"Authentication failed: Point selection distance too large ({distance} > {max_distance}).")
+            return False
+
+        point_image = original_image.crop((x_selected, y_selected, x_selected + 1, y_selected + 1))
+        original_hash = dhash(point_image, hash_size)
+
+        # Compare the hash values of the selected point in each share
+        for i in range(1, num_shares + 1):
+            share_image = Image.open(share_paths[i-1]).convert("RGB")
+            share_point_image = share_image.crop((x_selected, y_selected, x_selected + 1, y_selected + 1))
+            share_hash = dhash(share_point_image, hash_size)
+
+            # Compare the hash values using a threshold (adjust as needed)
+            if hamming_distance(original_hash, share_hash) < hash_size // 2:
+                print(f"Authentication successful!")
+                return True
+
+        print("Authentication failed: Selected point does not match in one or more shares.")
+    else:
+        print("Reconstructed image does not match the original image. Authentication process aborted.")
     return False
 
 def hamming_distance(hash1, hash2):
     return bin(int(hash1, 16) ^ int(hash2, 16)).count('1')
 
 # Example usage
-original_image =Image.open('tank.png')
+original_image = Image.open('tank.png')
 r = 99
 tolerance = 15
 
@@ -163,4 +191,3 @@ with warnings.catch_warnings():
         print('Authentication successful!')
     else:
         print('Authentication failed!')
-
