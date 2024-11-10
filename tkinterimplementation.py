@@ -35,8 +35,8 @@ def split_channel(channel, r, num_shares):
             x, y, z = hindmarsh_rose_model(x, y, z, a, b, c, d, r, x_r, I)
             chaotic_maps = [int(r * (1 - r) * pixel * (x + y + z)) for _ in range(num_shares - 1)]
             for k, share in enumerate(shares[:-1]):
-                share[i, j] = chaotic_maps[k]
-            shares[-1][i, j] = pixel - sum(chaotic_maps)
+                share[i, j] = abs(chaotic_maps[k])%256
+            shares[-1][i, j] = (pixel - sum(chaotic_maps)) % 256
             if num_shares % 2 == 0:
                 x_logistic = r * x_logistic * (1 - x_logistic)
                 for share in shares:
@@ -106,7 +106,7 @@ def registernaor(image, num_shares):
     return x, y  # Return the coordinates of the selected point
 
 def dhash(image, hash_size=8):
-    image = image.resize((hash_size + 1, hash_size), Image.ANTIALIAS).convert("L")
+    image = image.resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS).convert("L")
     pixels = np.array(image)
     diff = pixels[:, 1:] > pixels[:, :-1]
     decimal_value = 0
@@ -114,7 +114,7 @@ def dhash(image, hash_size=8):
         decimal_value += int(value) * (2 ** (i * hash_size + j))
     return hex(decimal_value)[2:]
 
-def authenticatenaor(original_image, num_shares, x, y, hash_size=8, max_distance=20):
+def authenticatenaor(original_image, num_shares, x, y, hash_size=8, max_distance=20, share_images=[]):
     print("Please select the same point in the original image:")
     original_image_array = np.array(original_image)
     plt.imshow(original_image_array)
@@ -128,30 +128,36 @@ def authenticatenaor(original_image, num_shares, x, y, hash_size=8, max_distance
 
     # Calculate the distance between the chosen coordinates and the set coordinates
     distance = abs(x_selected - x) + abs(y_selected - y)
-
     if distance > max_distance:
-        print(f"Authentication failed")
+        print(f"Authentication failed: Point is too far from the original selection.")
         return False
 
+    # Hash of the selected point in the original image
     point_image = original_image.crop((x_selected, y_selected, x_selected + 1, y_selected + 1))
     original_hash = dhash(point_image, hash_size)
 
-    combined_image = Image.open("combined_image.png")
-
-    # Compare the hash values of the selected point in each share
-    for i in range(1, num_shares + 1):
-        share_name = f"share{i}.png"
-        share_image = Image.open(share_name)
+    # Hash check across shares
+    for i, share_image in enumerate(share_images):
         share_point_image = share_image.crop((x_selected, y_selected, x_selected + 1, y_selected + 1))
         share_hash = dhash(share_point_image, hash_size)
 
-        # Compare the hash values using a threshold (adjust as needed)
-        if hamming_distance(original_hash, share_hash) < hash_size // 2:
-            print(f"Authentication successful! ")
-            return True
+        # Compare each share’s hash to the original image hash
+        if hamming_distance(original_hash, share_hash) > hash_size // 4:
+            print(f"Authentication failed: Hash mismatch in share {i + 1}.")
+            return False
 
-    print("Authentication failed: Selected point does not match in one or more shares.")
-    return False
+    # Cross-verify hashes between the shares to ensure consistency
+    for i in range(len(share_images) - 1):
+        for j in range(i + 1, len(share_images)):
+            hash_i = dhash(share_images[i].crop((x_selected, y_selected, x_selected + 1, y_selected + 1)), hash_size)
+            hash_j = dhash(share_images[j].crop((x_selected, y_selected, x_selected + 1, y_selected + 1)), hash_size)
+            if hamming_distance(hash_i, hash_j) > hash_size // 4:
+                print(f"Authentication failed: Share {i + 1} and Share {j + 1} do not match.")
+                return False
+
+    print("Authentication successful! All shares match and are consistent with the original image.")
+    return True
+
 
 
 def hamming_distance(hash1, hash2):
@@ -178,18 +184,21 @@ def register():
     addxynum(x,y,num_shares)
 
 def authenticate():
-    x,y,num_shares=getxynum()
+    x, y, num_shares = getxynum()
     original_image = Image.open('tank.png')
-    r = 99
-    tolerance = 15
-
-    share_images = [open_image() for _ in range(num_shares)]
-
+    
+    # Ask the user to open the share images
+    share_images = []
+    for i in range(num_shares):
+        share_image = open_image()
+        share_images.append(share_image)
 
     # Authenticate the user
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        if authenticatenaor(original_image, num_shares, x, y, hash_size=8, max_distance=20):
+        
+        # Check the authentication
+        if authenticatenaor(original_image, num_shares, x, y, hash_size=8, max_distance=20, share_images=share_images):
             print('Authentication successful!')
         else:
             print('Authentication failed!')
